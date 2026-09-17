@@ -3,16 +3,19 @@ from load_audio import stream_stereo_flac
 from preprocessing_audio import process_audio_for_anomaly
 from audio_inference import infer_anomaly_autoencoder
 from gmm import get_threshold
+from gmm_classifier import load_gmm_model, classify_errors
 from collections import deque
 import time
 
 
-def process_all_chunks(file_paths, mini, maxi, _model, history_size=8000, update_interval=2000):
+def process_all_chunks(file_paths, mini, maxi, _model, gmm_model_path= "gmm_model.pkl", history_size=8000, update_interval=2000):
     all_chunks = []
     step = 0
     history_errors = deque(maxlen=history_size)
     batch_errors = []  # store errors since last threshold update
     threshold = None   # initial threshold
+
+    gmm_model = load_gmm_model(gmm_model_path)
 
     for chunk in stream_stereo_flac(file_paths):
         result = process_audio_for_anomaly(chunk, min_val=mini, max_val=maxi)
@@ -31,6 +34,8 @@ def process_all_chunks(file_paths, mini, maxi, _model, history_size=8000, update
         hop_length = 441
         signal_length = len(filtered_signal)
         stretched_flags = np.zeros(signal_length, dtype=bool)
+        error_gmm_labels = np.full(len(errors), -1, dtype =int)
+        gmm_probabilities = np.empty((0, gmm_model.n_components))
 
         for e in errors:
             history_errors.append(e)
@@ -44,19 +49,34 @@ def process_all_chunks(file_paths, mini, maxi, _model, history_size=8000, update
                 step += 1
 
         anomaly_flags = errors > threshold
-
+        anomaly_errors = errors[anomaly_flags]
+        if len(anomaly_errors) > 0:
+            gmm_labels, gmm_probabilities = classify_errors(gmm_model, anomaly_errors)
+            error_gmm_labels[anomaly_flags] = gmm_labels
         # Stretch anomaly flags to match filtered signal length
+
+        stretched_gmm_labels = np.full(
+            signal_length,
+            -1,
+            dtype=int
+        )
+
         for i, flag in enumerate(anomaly_flags):
             start = i * hop_length
             end = min(start + hop_length, signal_length)
             if flag:
                 stretched_flags[start:end] = True
+                stretched_gmm_labels[start: end] = (error_gmm_labels[i])
 
         all_chunks.append({
             'filtered_signal': filtered_signal,
             'anomaly_flags': stretched_flags,
             'errors': errors,
-            'threshold': threshold
+            'threshold': threshold,
+            'error_anomaly_flags': anomaly_flags,
+            'error_gmm_labels': error_gmm_labels,
+            'gmm_probabilities': gmm_probabilities,
+            'stretched_gmm_labels': stretched_gmm_labels
         })
 
     return all_chunks
